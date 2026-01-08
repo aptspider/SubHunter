@@ -1,4 +1,3 @@
-gomodule github.com/aptspider/SubHunter
+module github.com/aptspider/SubHunter
 
 go 1.21
-
