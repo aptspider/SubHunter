@@ -36,9 +36,9 @@ Silent Mode (For Piping): Pipe subdomains directly into other tools like httpx:
 SubHunter -d example.com -silent | httpx
 ````
 
-```
+
  Disclaimer
 
 This tool is strictly for educational purposes and authorized security research only. Any actions and/or activities related to the material contained within this repository are solely your responsibility. The developers will not be held responsible for any misuse or damage caused by this program. Do not use this tool on systems you do not have explicit permission to test.
 
-````
+
