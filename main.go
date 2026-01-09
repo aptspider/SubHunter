@@ -312,7 +312,7 @@ func main() {
 	domain := flag.String("d", "", "target domain")
 	domainList := flag.String("l", "", "file with domain list")
 	output := flag.String("o", "", "output file path")
-	timeout := flag.Int("t", 10, "timeout in seconds")
+	timeout := flag.Int("t", 300, "timeout in seconds")
 	concurrency := flag.Int("c", 5, "concurrent workers")
 	concurrent := flag.Bool("concurrent", false, "enable concurrent mode")
 	silent := flag.Bool("silent", false, "silent mode (only results)")
