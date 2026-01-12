@@ -16,17 +16,17 @@ import (
 )
 
 const (
-	version = "1.0.0"
+	version = "1.0.1"
 	banner  = `
-   _____       _     _    _             _            
-  / ____|     | |   | |  | |           | |           
- | (___  _   _| |__ | |__| |_   _ _ __ | |_ ___ _ __ 
-  \___ \| | | | '_ \|  __  | | | | '_ \| __/ _ \ '__|
-  ____) | |_| | |_) | |  | | |_| | | | | ||  __/ |   
- |_____/ \__,_|_.__/|_|  |_|\__,_|_| |_|\__\___|_|   
+    _____        _      _     _              _           
+   / ____|      | |    | |   | |            | |          
+  | (___   _   _| |__  | |__ | |_   _ _ __  | |_ ___ _ __ 
+   \___ \ | | | | '_ \ |  __ | | | | | '_ \ | __/ _ \ '__|
+   ____) | |_| | |_) | | |  | | |_| | | | | ||  __/ |    
+  |_____/ \__,_|_.__/|_| |_|\__,_|_| |_|\__\___|_|    
                                                       
-  Certificate Transparency Subdomain Enumerator
-  Powered by crt.sh | By SpiderSec | v%s
+   Certificate Transparency Subdomain Enumerator
+   Powered by crt.sh | By SpiderSec | v%s
 `
 )
 
@@ -49,6 +49,7 @@ type SubHunter struct {
 	client      *http.Client
 	totalFound  int
 	mu          sync.Mutex
+	maxRetries  int
 }
 
 func NewSubHunter(timeout int, concurrency int, silent bool) *SubHunter {
@@ -56,6 +57,7 @@ func NewSubHunter(timeout int, concurrency int, silent bool) *SubHunter {
 		timeout:     time.Duration(timeout) * time.Second,
 		concurrency: concurrency,
 		silent:      silent,
+		maxRetries:  3, // Try 3 times before giving up
 		client: &http.Client{
 			Timeout: time.Duration(timeout) * time.Second,
 		},
@@ -83,6 +85,8 @@ func (s *SubHunter) log(level, message, data string) {
 		icon = pink + "[*]" + reset
 	case "run":
 		icon = pink + "[>]" + reset
+	case "retry":
+		icon = pink + "[RTY]" + reset
 	}
 
 	if data != "" {
@@ -146,36 +150,66 @@ func (s *SubHunter) extractSubdomains(domain string, nameValues []string) []stri
 
 func (s *SubHunter) queryAPI(domain string) ([]string, error) {
 	url := fmt.Sprintf("https://crt.sh/?q=%%.%s&output=json", domain)
+	var lastErr error
 
-	s.log("run", "Querying crt.sh API", domain)
+	// RETRY LOOP
+	for attempt := 1; attempt <= s.maxRetries; attempt++ {
+		if attempt > 1 {
+			s.log("retry", fmt.Sprintf("Attempt %d/%d for", attempt, s.maxRetries), domain)
+			time.Sleep(time.Duration(attempt) * time.Second) // Backoff: 1s, 2s, 3s...
+		} else {
+			s.log("run", "Querying crt.sh API", domain)
+		}
 
-	resp, err := s.client.Get(url)
-	if err != nil {
-		return nil, err
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		// User-Agent prevents some WAF blocks
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+
+		resp, err := s.client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue // Try again on connection error
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+			// If it's a 502/503/504, it's a server error, so we retry.
+			// If it's 404, retrying won't help, but for crt.sh 404 usually means something broke anyway.
+			continue
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		// Check if body is HTML (crt.sh often returns HTML error pages with status 200 sometimes)
+		if strings.HasPrefix(strings.TrimSpace(string(body)), "<") {
+			lastErr = fmt.Errorf("API returned HTML instead of JSON")
+			continue
+		}
+
+		var results []CRTResponse
+		if err := json.Unmarshal(body, &results); err != nil {
+			lastErr = fmt.Errorf("JSON decode failed: %v", err)
+			continue
+		}
+
+		// If we got here, success!
+		nameValues := make([]string, len(results))
+		for i, result := range results {
+			nameValues[i] = result.NameValue
+		}
+		return s.extractSubdomains(domain, nameValues), nil
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var results []CRTResponse
-	if err := json.Unmarshal(body, &results); err != nil {
-		s.log("warn", "JSON decode failed", "")
-		return nil, err
-	}
-
-	nameValues := make([]string, len(results))
-	for i, result := range results {
-		nameValues[i] = result.NameValue
-	}
-
-	return s.extractSubdomains(domain, nameValues), nil
+	return nil, fmt.Errorf("max retries exceeded: %v", lastErr)
 }
 
 func (s *SubHunter) processDomain(domain string, showResults bool) []string {
@@ -312,7 +346,8 @@ func main() {
 	domain := flag.String("d", "", "target domain")
 	domainList := flag.String("l", "", "file with domain list")
 	output := flag.String("o", "", "output file path")
-	timeout := flag.Int("t", 300, "timeout in seconds")
+	// Changed default timeout to 60s
+	timeout := flag.Int("t", 60, "timeout in seconds")
 	concurrency := flag.Int("c", 5, "concurrent workers")
 	concurrent := flag.Bool("concurrent", false, "enable concurrent mode")
 	silent := flag.Bool("silent", false, "silent mode (only results)")
@@ -356,12 +391,12 @@ func main() {
 			outputStr = *output
 		}
 
-		fmt.Printf("  Target:      %s%s%s\n", pink, target, reset)
-		fmt.Printf("  Output:      %s%s%s\n", pink, outputStr, reset)
-		fmt.Printf("  Timeout:     %s%ds%s\n", pink, *timeout, reset)
+		fmt.Printf("  Target:       %s%s%s\n", pink, target, reset)
+		fmt.Printf("  Output:       %s%s%s\n", pink, outputStr, reset)
+		fmt.Printf("  Timeout:      %s%ds%s\n", pink, *timeout, reset)
 
 		if *domainList != "" && *concurrent {
-			fmt.Printf("  Workers:     %s%d%s\n", pink, *concurrency, reset)
+			fmt.Printf("  Workers:      %s%d%s\n", pink, *concurrency, reset)
 		}
 
 		fmt.Printf("%s%s%s\n\n", pink, strings.Repeat("━", 60), reset)
